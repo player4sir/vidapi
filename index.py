@@ -1,4 +1,3 @@
-from mangum import Mangum
 from fastapi import FastAPI, Query
 import aiohttp
 import asyncio
@@ -16,6 +15,9 @@ user_agents = [
     'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.77 Safari/537.36'
 ]
 
+@app.get("/api/test")
+async def test():
+    return {"message": "API is working!"}
 
 async def fetch(session, url, retries=5):
     for attempt in range(retries):
@@ -116,4 +118,4 @@ async def get_videos(
         return {"error": str(e)}
 
 # Vercel requires a handler function
-handler = Mangum(app)
+handler = app
