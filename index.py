@@ -1,4 +1,7 @@
-from fastapi import FastAPI, HTTPException, Query
+import os
+import asyncio
+from fastapi import FastAPI, HTTPException, Query, Depends
+from pydantic import BaseModel
 from bs4 import BeautifulSoup
 import httpx
 import re
@@ -6,14 +9,20 @@ from urllib.parse import urljoin
 
 app = FastAPI()
 
-async def fetch(url: str):
+# 从环境变量获取 BASE_URL，如果没有设置则使用默认值
+BASE_URL = os.getenv('BASE_URL', 'https://www.hsck.la')
+
+async def fetch_with_retry(url: str, max_retries: int = 3):
     async with httpx.AsyncClient() as client:
-        try:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.text
-        except httpx.HTTPError as e:
-            raise HTTPException(status_code=500, detail=f"Error fetching {url}: {str(e)}")
+        for attempt in range(max_retries):
+            try:
+                response = await client.get(url, timeout=10.0)
+                response.raise_for_status()
+                return response.text
+            except httpx.HTTPError as e:
+                if attempt == max_retries - 1:
+                    raise HTTPException(status_code=500, detail=f"Error fetching {url}: {str(e)}")
+                await asyncio.sleep(1)  # Wait for 1 second before retrying
 
 def extract_item_data(item):
     thumb = item.select_one('a.stui-vodlist__thumb')
@@ -45,31 +54,42 @@ def extract_m3u8_link(html):
             return match.group(1).replace('\\', '')
     return None
 
-@app.get("/api/videos")
-async def get_videos(
-    base_url: str = Query(..., description="Base URL of the website"),
-    category: int = Query(..., description="Category ID"),
-    page: int = Query(1, description="Page number", ge=1),
-    per_page: int = Query(20, description="Items per page", ge=1, le=100)
-):
-    url = urljoin(base_url, f'/index.php/vod/type/id/{category}/page/{page}.html')
-    
-    html = await fetch(url)
-    soup = BeautifulSoup(html, 'html.parser')
-    items = soup.select('li .stui-vodlist__box')
-    
-    extracted_items = []
-    for item in items[:per_page]:
-        item_data = extract_item_data(item)
-        if item_data:
-            detail_url = urljoin(base_url, f'/index.php/vod/play/id/{item_data["vid"]}/sid/1/nid/1.html')
-            detail_html = await fetch(detail_url)
-            item_data['m3u8_link'] = extract_m3u8_link(detail_html)
-            extracted_items.append(item_data)
+async def fetch_item_details(item_data: dict):
+    detail_url = urljoin(BASE_URL, f'/index.php/vod/play/id/{item_data["vid"]}/sid/1/nid/1.html')
+    detail_html = await fetch_with_retry(detail_url)
+    item_data['m3u8_link'] = extract_m3u8_link(detail_html)
+    return item_data
 
-    return {
-        "category": category,
-        "page": page,
-        "per_page": per_page,
-        "items": extracted_items
-    }
+class VideoQuery(BaseModel):
+    category: int
+    page: int = Query(1, ge=1)
+    per_page: int = Query(20, ge=1, le=100)
+
+@app.get("/api/videos")
+async def get_videos(query: VideoQuery = Depends()):
+    try:
+        url = urljoin(BASE_URL, f'/index.php/vod/type/id/{query.category}/page/{query.page}.html')
+        
+        html = await fetch_with_retry(url)
+        soup = BeautifulSoup(html, 'html.parser')
+        items = soup.select('li .stui-vodlist__box')
+        
+        extracted_items = [extract_item_data(item) for item in items[:query.per_page] if extract_item_data(item)]
+        
+        tasks = [fetch_item_details(item) for item in extracted_items]
+        detailed_items = await asyncio.gather(*tasks)
+
+        return {
+            "category": query.category,
+            "page": query.page,
+            "per_page": query.per_page,
+            "total_items": len(items),
+            "has_next": len(items) > query.per_page,
+            "items": detailed_items
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
