@@ -1,20 +1,19 @@
-from mangum import Mangum
-from fastapi import FastAPI, Query, HTTPException
-import httpx
+from fastapi import FastAPI, HTTPException, Query
 from bs4 import BeautifulSoup
+import httpx
 import re
 from urllib.parse import urljoin
-import asyncio
 
 app = FastAPI()
 
-async def fetch(url: str, client: httpx.AsyncClient):
-    try:
-        response = await client.get(url)
-        response.raise_for_status()
-        return response.text
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching {url}: {str(e)}")
+async def fetch(url: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.text
+        except httpx.HTTPError as e:
+            raise HTTPException(status_code=500, detail=f"Error fetching {url}: {str(e)}")
 
 def extract_item_data(item):
     thumb = item.select_one('a.stui-vodlist__thumb')
@@ -46,21 +45,6 @@ def extract_m3u8_link(html):
             return match.group(1).replace('\\', '')
     return None
 
-async def process_page(url: str, client: httpx.AsyncClient):
-    html = await fetch(url, client)
-    soup = BeautifulSoup(html, 'html.parser')
-    items = soup.select('li .stui-vodlist__box')
-    return [item_data for item in items if (item_data := extract_item_data(item))]
-
-async def process_detail_pages(base_url: str, items: list, client: httpx.AsyncClient):
-    async def fetch_m3u8(item):
-        detail_url = urljoin(base_url, f'/index.php/vod/play/id/{item["vid"]}/sid/1/nid/1.html')
-        html = await fetch(detail_url, client)
-        item['m3u8_link'] = extract_m3u8_link(html)
-        return item
-
-    return await asyncio.gather(*[fetch_m3u8(item) for item in items])
-
 @app.get("/api/videos")
 async def get_videos(
     base_url: str = Query(..., description="Base URL of the website"),
@@ -70,20 +54,22 @@ async def get_videos(
 ):
     url = urljoin(base_url, f'/index.php/vod/type/id/{category}/page/{page}.html')
     
-    async with httpx.AsyncClient() as client:
-        items = await process_page(url, client)
-        items = items[:per_page]
-        items_with_m3u8 = await process_detail_pages(base_url, items, client)
+    html = await fetch(url)
+    soup = BeautifulSoup(html, 'html.parser')
+    items = soup.select('li .stui-vodlist__box')
+    
+    extracted_items = []
+    for item in items[:per_page]:
+        item_data = extract_item_data(item)
+        if item_data:
+            detail_url = urljoin(base_url, f'/index.php/vod/play/id/{item_data["vid"]}/sid/1/nid/1.html')
+            detail_html = await fetch(detail_url)
+            item_data['m3u8_link'] = extract_m3u8_link(detail_html)
+            extracted_items.append(item_data)
 
     return {
         "category": category,
         "page": page,
         "per_page": per_page,
-        "items": items_with_m3u8
+        "items": extracted_items
     }
-
-handler = Mangum(app)
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
