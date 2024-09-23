@@ -1,12 +1,7 @@
-# fastapi==0.103.2
-# uvicorn==0.23.2
-# httpx==0.24.1
-# beautifulsoup4==4.12.2
-# pydantic==2.0.2
-
-#worker for cloudfare
 fastapi
+uvicorn
 httpx
 beautifulsoup4
 pydantic
-mangum
+
+#worker for cloudfare

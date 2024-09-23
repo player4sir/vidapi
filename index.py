@@ -7,7 +7,7 @@ import httpx
 import re
 from urllib.parse import urljoin
 from typing import List, Optional
-# from fastapi_cloudworker import FastAPIWorker
+
 
 app = FastAPI()
 
@@ -109,6 +109,5 @@ async def get_videos(query: VideoQuery = Depends()) -> VideoResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
-# from mangum import Mangum
-# handler = Mangum(app)
+
 
