@@ -109,6 +109,6 @@ async def get_videos(query: VideoQuery = Depends()) -> VideoResponse:
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
-from mangum import Mangum
-handler = Mangum(app)
+# from mangum import Mangum
+# handler = Mangum(app)
 
