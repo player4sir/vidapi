@@ -6,13 +6,13 @@ from bs4 import BeautifulSoup
 import httpx
 import re
 from urllib.parse import urljoin
+from typing import List, Optional
 
 app = FastAPI()
 
-# 从环境变量获取 BASE_URL，如果没有设置则使用默认值
 BASE_URL = os.getenv('BASE_URL', 'https://www.hsck.la')
 
-async def fetch_with_retry(url: str, max_retries: int = 3):
+async def fetch_with_retry(url: str, max_retries: int = 3) -> str:
     async with httpx.AsyncClient() as client:
         for attempt in range(max_retries):
             try:
@@ -22,9 +22,19 @@ async def fetch_with_retry(url: str, max_retries: int = 3):
             except httpx.HTTPError as e:
                 if attempt == max_retries - 1:
                     raise HTTPException(status_code=500, detail=f"Error fetching {url}: {str(e)}")
-                await asyncio.sleep(1)  # Wait for 1 second before retrying
+                await asyncio.sleep(1)
 
-def extract_item_data(item):
+class VideoItem(BaseModel):
+    vid: str
+    title: str
+    image: str
+    quality: str
+    full_title: str
+    play_count: str
+    date: str
+    m3u8_link: Optional[str] = None
+
+def extract_item_data(item: BeautifulSoup) -> Optional[VideoItem]:
     thumb = item.select_one('a.stui-vodlist__thumb')
     detail = item.select_one('div.stui-vodlist__detail')
 
@@ -35,17 +45,17 @@ def extract_item_data(item):
     vid_match = re.search(r'/id/(\d+)/', href)
     vid = vid_match.group(1) if vid_match else ''
 
-    return {
-        "vid": vid,
-        "title": thumb.get('title', ''),
-        "image": thumb.get('data-original', ''),
-        "quality": thumb.select_one('span.pic-text').text if thumb.select_one('span.pic-text') else '',
-        "full_title": detail.select_one('h4.title a').text if detail.select_one('h4.title a') else '',
-        "play_count": detail.select_one('p.sub span.pull-right').text if detail.select_one('p.sub span.pull-right') else '',
-        "date": detail.select_one('p.sub').contents[-1].strip() if detail.select_one('p.sub') else ''
-    }
+    return VideoItem(
+        vid=vid,
+        title=thumb.get('title', ''),
+        image=thumb.get('data-original', ''),
+        quality=thumb.select_one('span.pic-text').text if thumb.select_one('span.pic-text') else '',
+        full_title=detail.select_one('h4.title a').text if detail.select_one('h4.title a') else '',
+        play_count=detail.select_one('p.sub span.pull-right').text if detail.select_one('p.sub span.pull-right') else '',
+        date=detail.select_one('p.sub').contents[-1].strip() if detail.select_one('p.sub') else ''
+    )
 
-def extract_m3u8_link(html):
+def extract_m3u8_link(html: str) -> Optional[str]:
     soup = BeautifulSoup(html, 'html.parser')
     script = soup.find('script', string=lambda t: t and 'player_aaaa' in t)
     if script:
@@ -54,19 +64,27 @@ def extract_m3u8_link(html):
             return match.group(1).replace('\\', '')
     return None
 
-async def fetch_item_details(item_data: dict):
-    detail_url = urljoin(BASE_URL, f'/index.php/vod/play/id/{item_data["vid"]}/sid/1/nid/1.html')
+async def fetch_item_details(item: VideoItem) -> VideoItem:
+    detail_url = urljoin(BASE_URL, f'/index.php/vod/play/id/{item.vid}/sid/1/nid/1.html')
     detail_html = await fetch_with_retry(detail_url)
-    item_data['m3u8_link'] = extract_m3u8_link(detail_html)
-    return item_data
+    item.m3u8_link = extract_m3u8_link(detail_html)
+    return item
 
 class VideoQuery(BaseModel):
     category: int
     page: int = Query(1, ge=1)
     per_page: int = Query(20, ge=1, le=100)
 
-@app.get("/api/videos")
-async def get_videos(query: VideoQuery = Depends()):
+class VideoResponse(BaseModel):
+    category: int
+    page: int
+    per_page: int
+    total_items: int
+    has_next: bool
+    items: List[VideoItem]
+
+@app.get("/api/videos", response_model=VideoResponse)
+async def get_videos(query: VideoQuery = Depends()) -> VideoResponse:
     try:
         url = urljoin(BASE_URL, f'/index.php/vod/type/id/{query.category}/page/{query.page}.html')
         
@@ -79,14 +97,14 @@ async def get_videos(query: VideoQuery = Depends()):
         tasks = [fetch_item_details(item) for item in extracted_items]
         detailed_items = await asyncio.gather(*tasks)
 
-        return {
-            "category": query.category,
-            "page": query.page,
-            "per_page": query.per_page,
-            "total_items": len(items),
-            "has_next": len(items) > query.per_page,
-            "items": detailed_items
-        }
+        return VideoResponse(
+            category=query.category,
+            page=query.page,
+            per_page=query.per_page,
+            total_items=len(items),
+            has_next=len(items) > query.per_page,
+            items=detailed_items
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
